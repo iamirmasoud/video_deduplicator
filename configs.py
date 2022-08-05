@@ -1,4 +1,4 @@
-videos_dir = "/media/masoud/66226DDE226DB429/meysam/Video/CONCERTS/Bahar 1401 Tour"
+videos_dir = "videos"
 extensions = ("mp4", "MP4", "avi", "AVI", "mov", "MOV")
 type = "2d"
 batch_size = 64
