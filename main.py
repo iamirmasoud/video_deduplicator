@@ -1,18 +1,19 @@
 import logging
+import math
 import os
 import sys
 
 import pandas as pd
 import torch
-from sklearn.cluster import DBSCAN
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
 
-from configs import (batch_size, delete_files, embedding_size, epsilon,
-                     extensions, image_resize, images_dir)
-from images_dataset import VideosDataset
-from model import EncoderCNN
+import configs
+from dbscan_features import dbscan_features
+from model import get_model
+from preprocessing import Preprocessing
+from videos_dataset import VideosDataset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -20,75 +21,93 @@ logging.basicConfig(
     format="%(asctime)s — %(levelname)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+videos_dir = configs.videos_dir
 
 if len(sys.argv) > 1:
-    images_dir = sys.argv[1]
+    videos_dir = sys.argv[1]
 
-if not os.path.isdir(images_dir):
-    logger.error(f"Directory '{images_dir}' does not exist.")
+if not os.path.isdir(videos_dir):
+    logger.error(f"Directory '{videos_dir}' does not exist.")
     raise NotADirectoryError
-
-# Define a transform to pre-process the training videos.
-transformer = transforms.Compose(
-    [
-        transforms.Resize((image_resize, image_resize)),
-        # convert the PIL Image to a tensor
-        transforms.ToTensor(),
-        # normalize image for pre-trained model
-        transforms.Normalize(
-            (0.485, 0.456, 0.406),
-            (0.229, 0.224, 0.225),
-        ),
-    ]
-)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info(f"Using device: {str(device).upper()}")
 
 dataset = VideosDataset(
-    directory=images_dir, extensions=extensions, transform=transformer
+    directory=videos_dir,
+    extensions=configs.extensions,
+    frame_rate=1 if configs.type == "2d" else 24,
+    size=224 if configs.type == "2d" else 112,
+    center_crop=(configs.type == "3d"),
 )
-data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-logger.info(f"Found {len(dataset)} image files in directory '{images_dir}'.")
+logger.info(f"Found {len(dataset)} video files in directory '{videos_dir}'.")
 
-# Initializing the encoder
-encoder = EncoderCNN(embedding_size=embedding_size)
-encoder.to(device)
-encoder.eval()
 
-# ------ Extracting features ------
-features_df = pd.DataFrame([])
-for images_batch, paths in tqdm(data_loader):
-    images = images_batch.to(device)
-    encoder.zero_grad()
+loader = DataLoader(
+    dataset,
+    batch_size=1,
+    shuffle=False,
+)
+preprocess = Preprocessing(configs.type)
+model = get_model(model_type=configs.type, model_path=configs.model_path)
 
-    # Passing the inputs through the CNN model
-    with torch.no_grad():
-        features = encoder(images)
-    batch_df = pd.DataFrame(features.cpu().numpy(), index=paths)
-    features_df = features_df.append(batch_df)
+model.to(device)
+model.eval()
+features = {}
+with torch.no_grad():
+    for k, data in enumerate(tqdm(loader)):
+        video, video_path = data[0], data[1][0]
+        video = video.squeeze()
+        if len(video.shape) == 4:
+            logger.debug(f'Computing features of video "{video_path}"')
+            video = preprocess(video)
+            n_chunk = len(video)
+            video_features = torch.cuda.FloatTensor(n_chunk, 2048).fill_(0)
+            n_iter = int(math.ceil(n_chunk / float(configs.batch_size)))
+            for i in range(n_iter):
+                min_ind = i * configs.batch_size
+                max_ind = (i + 1) * configs.batch_size
+                video_batch = video[min_ind:max_ind].cuda()
+                batch_features = model(video_batch)
+                if configs.l2_normalize:
+                    batch_features = F.normalize(batch_features, dim=1)
+                video_features[min_ind:max_ind] = batch_features
+            video_features = video_features.cpu().numpy()
+            if configs.half_precision:
+                video_features = video_features.astype("float16")
+            features[video_path] = video_features
+        else:
+            logger.warning(f'Skipping video "{video_path}"')
 
-logging.info("Features have been extracted .")
+logger.info("Features for all videos have been extracted.")
 
-# ------ Clustering ------
-model = DBSCAN(min_samples=1, eps=epsilon)
+# group videos by their length
+lengths_df = pd.DataFrame(
+    {k: v.shape[0] for k, v in features.items()}.items(), columns=["path", "len"]
+)
+grouped_by_length = lengths_df.groupby("len")["path"]
 
-clusters = pd.DataFrame(
-    {"path": features_df.index, "label": model.fit_predict(features_df)}
-).sort_values(["label", "path"], ascending=False)
+# in each group (videos of the same length), perform dbscan clustering to find duplicates
+files_to_remove = set()
+for length, group in tqdm(grouped_by_length):
+    paths = group.tolist()
+    if len(paths) > 1:
+        logger.info(f"Deduplicating ({len(paths)}) items with length {length}:")
+        # flatten two dimensional series of videos to one dimensional time series for DBSCAN
+        len_group_features = [features[path].flatten() for path in paths]
 
-# select one of elements from each cluster to keep
-list_to_keep = set(clusters.groupby("label")["path"].first())
-all_files = set(clusters["path"])
+        features_df = pd.DataFrame(len_group_features, index=paths)
+        to_remove = dbscan_features(features_df, epsilon=configs.epsilon)
+        if to_remove:
+            files_to_remove.update(to_remove)
 
-files_to_remove = all_files - list_to_keep
-logger.info(f"Found {len(files_to_remove)} duplicate files:\n {files_to_remove}")
+logger.info(f"Found {len(files_to_remove)} duplicated files to remove!")
 
-# ------ Removing files ------
-if delete_files:
+
+if configs.delete_files:
     for file_path in files_to_remove:
         try:
             os.remove(file_path)
         except OSError as e:
-            print("Cannot delete file ''%s': %s" % (file_path, e.strerror))
+            print("Cannot delete file '%s': %s" % (file_path, e.strerror))
     logger.info(f"Successfully deleted {len(files_to_remove)} duplicate files.")

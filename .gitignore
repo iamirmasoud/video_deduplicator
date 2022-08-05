@@ -127,7 +127,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-models/
 .idea/
 videos/
 debug_script.py

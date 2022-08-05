@@ -1,15 +1,19 @@
 import logging
+import math
+import os
+import pickle
+import sys
 
-import pandas as pd
 import torch
+import torch as th
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from tqdm import tqdm
 
-from configs import (batch_size, embedding_size, extensions, image_resize,
-                     images_dir)
-from images_dataset import VideosDataset
-from model import EncoderCNN
+import configs
+from model import get_model
+from preprocessing import Preprocessing
+from videos_dataset import VideosDataset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -17,43 +21,65 @@ logging.basicConfig(
     format="%(asctime)s — %(levelname)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+videos_dir = configs.videos_dir
 
-# Define a transform to pre-process the training videos.
-transformer = transforms.Compose(
-    [
-        transforms.Resize((image_resize, image_resize)),
-        # convert the PIL Image to a tensor
-        transforms.ToTensor(),
-        # normalize image for pre-trained model
-        transforms.Normalize(
-            (0.485, 0.456, 0.406),
-            (0.229, 0.224, 0.225),
-        ),
-    ]
-)
+if len(sys.argv) > 1:
+    videos_dir = sys.argv[1]
+
+if not os.path.isdir(videos_dir):
+    logger.error(f"Directory '{videos_dir}' does not exist.")
+    raise NotADirectoryError
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.info(f"Using device: {str(device).upper()}")
 
 dataset = VideosDataset(
-    directory=images_dir, extensions=extensions, transform=transformer
+    directory=videos_dir,
+    extensions=configs.extensions,
+    frame_rate=1 if configs.type == "2d" else 24,
+    size=224 if configs.type == "2d" else 112,
+    center_crop=(configs.type == "3d"),
 )
-data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-logger.info(f"Found {len(dataset)} files in the directory.")
-# Initializing the encoder
-encoder = EncoderCNN(embedding_size=embedding_size)
-encoder.to(device)
-encoder.eval()
 
-full_features_df = pd.DataFrame([])
-for images_batch, paths in tqdm(data_loader):
-    images = images_batch.to(device)
-    encoder.zero_grad()
+logger.info(f"Found {len(dataset)} video files in directory '{videos_dir}'.")
 
-    # Passing the inputs through the CNN model
-    with torch.no_grad():
-        features = encoder(images)
-    batch_df = pd.DataFrame(features.cpu().numpy(), index=paths)
-    full_features_df = full_features_df.append(batch_df)
+loader = DataLoader(
+    dataset,
+    batch_size=1,
+    shuffle=False,
+    sampler=None,
+)
+preprocess = Preprocessing(configs.type)
+model = get_model(model_type=configs.type, model_path=configs.model_path)
 
-full_features_df.to_pickle("features.pkl")
+model.to(device)
+model.eval()
+features = {}
+with th.no_grad():
+    for k, data in enumerate(tqdm(loader)):
+        video, video_path = data[0], data[1][0]
+        video = video.squeeze()
+        if len(video.shape) == 4:
+            logger.debug(f'Computing features of video "{video_path}"')
+            video = preprocess(video)
+            n_chunk = len(video)
+            video_features = th.cuda.FloatTensor(n_chunk, 2048).fill_(0)
+            n_iter = int(math.ceil(n_chunk / float(configs.batch_size)))
+            for i in range(n_iter):
+                min_ind = i * configs.batch_size
+                max_ind = (i + 1) * configs.batch_size
+                video_batch = video[min_ind:max_ind].cuda()
+                batch_features = model(video_batch)
+                if configs.l2_normalize:
+                    batch_features = F.normalize(batch_features, dim=1)
+                video_features[min_ind:max_ind] = batch_features
+            video_features = video_features.cpu().numpy()
+            if configs.half_precision:
+                video_features = video_features.astype("float16")
+            features[video_path] = video_features
+        else:
+            logger.warning(f'Skipping video "{video_path}"')
+
+with open("features.pkl", "wb") as f:
+    pickle.dump(features, f)
 logging.info("Features have been extracted and stored to 'features.pkl'.")

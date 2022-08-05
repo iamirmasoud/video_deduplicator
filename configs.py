@@ -1,8 +1,10 @@
-images_dir = "videos"
-extensions = ("jpg", "jpeg", "png", "bmp")
-batch_size = 128
-embedding_size = 256
-image_resize = 256
+videos_dir = "/media/masoud/66226DDE226DB429/meysam/Video/CONCERTS/Bahar 1401 Tour"
+extensions = ("mp4", "MP4", "avi", "AVI", "mov", "MOV")
+type = "2d"
+batch_size = 64
+half_precision = 1
+l2_normalize = 1
+model_path = "model/resnext101.pth"
 epsilon = 0.001
 # Warning: Setting the following config to True will result in removing the detected duplicate videos from disk.
 # If you are not sure to do this, you can check and then delete the detected videos manually one by one.
