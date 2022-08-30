@@ -29,12 +29,12 @@ cd video_deduplicator
 	
 	At this point your command line should look something like: `(deduplicator_env) <User>:video_deduplicator <user>$`. The `(deduplicator_env)` indicates that your environment has been activated, and you can proceed with further package installations.
 
-6. Before you can experiment with the code, you'll have to make sure that you have all the libraries and dependencies required to support this project. You will mainly need Python3.7+, PyTorch, and its torchvision. You can install dependencies using:
+3. Before you can experiment with the code, you'll have to make sure that you have all the libraries and dependencies required to support this project. You will mainly need Python3.7+, PyTorch, and its torchvision. You can install dependencies using:
 ```
 pip install -r requirements.txt
 ```
 
-7. Navigate back to the repo. (Also, your source environment should still be activated at this point.)
+4. Navigate back to the repo. (Also, your source environment should still be activated at this point.)
 ```shell
 cd video_deduplicator
 ```
